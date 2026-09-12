@@ -7,8 +7,8 @@ pub use settings::AlternateScroll;
 
 use settings::{
     IntoGpui, PathHyperlinkRegex, RegisterSetting, ShowScrollbar, TerminalBell, TerminalBlink,
-    TerminalDockPosition, TerminalLineHeight, VenvSettings, WorkingDirectory,
-    merge_from::MergeFrom,
+    TerminalDockPosition, TerminalLineHeight, TerminalProfileContent, VenvSettings,
+    WorkingDirectory, merge_from::MergeFrom,
 };
 use task::Shell;
 use theme_settings::FontFamilyName;
@@ -52,6 +52,28 @@ pub struct TerminalSettings {
     pub path_hyperlink_timeout_ms: u64,
     pub show_count_badge: bool,
     pub bell: TerminalBell,
+    pub profiles: Vec<TerminalProfile>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct TerminalProfile {
+    pub label: String,
+    pub shell: Shell,
+    pub env: HashMap<String, String>,
+    pub working_directory: Option<WorkingDirectory>,
+}
+
+fn settings_profile_to_terminal_profile(profile: TerminalProfileContent) -> TerminalProfile {
+    TerminalProfile {
+        shell: Shell::WithArguments {
+            program: profile.program,
+            args: profile.args,
+            title_override: Some(profile.label.clone()),
+        },
+        label: profile.label,
+        env: profile.env,
+        working_directory: profile.working_directory,
+    }
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -136,6 +158,12 @@ impl settings::Settings for TerminalSettings {
             path_hyperlink_timeout_ms: project_content.path_hyperlink_timeout_ms.unwrap(),
             show_count_badge: user_content.show_count_badge.unwrap(),
             bell: user_content.bell.unwrap(),
+            profiles: project_content
+                .profiles
+                .unwrap_or_default()
+                .into_iter()
+                .map(settings_profile_to_terminal_profile)
+                .collect(),
         }
     }
 }

@@ -987,6 +987,7 @@ impl VsCodeSettings {
             detect_venv: None,
             path_hyperlink_regexes: None,
             path_hyperlink_timeout_ms: None,
+            profiles: None,
         }
     }
 

@@ -63,6 +63,30 @@ pub struct ProjectTerminalSettingsContent {
     ///
     /// Default: 1
     pub path_hyperlink_timeout_ms: Option<u64>,
+    /// Terminal profiles, listed in the terminal panel's new terminal menu.
+    /// Each profile opens a terminal running the program it names.
+    ///
+    /// Default: []
+    pub profiles: Option<Vec<TerminalProfileContent>>,
+}
+
+/// A named terminal profile, listed in the terminal panel's new terminal menu.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TerminalProfileContent {
+    /// The name shown in the menu, also used as the terminal tab's title.
+    pub label: String,
+    /// The program to run.
+    pub program: String,
+    /// The arguments to pass to the program.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Key-value pairs added to this profile's terminal environment, on top of
+    /// the ones from the `env` setting.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// What working directory to use when launching this profile.
+    /// Defaults to the `working_directory` setting.
+    pub working_directory: Option<WorkingDirectory>,
 }
 
 #[with_fallible_options]

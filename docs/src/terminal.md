@@ -59,6 +59,45 @@ To pass arguments to your shell:
 }
 ```
 
+## Terminal Profiles
+
+Profiles add entries to the `+` menu of the terminal panel, each one opening a terminal that runs the program you configure instead of your shell:
+
+```json [settings]
+{
+  "terminal": {
+    "profiles": [
+      {
+        "label": "Login shell",
+        "program": "/bin/bash",
+        "args": ["--login"]
+      },
+      {
+        "label": "Server logs",
+        "program": "journalctl",
+        "args": ["-fu", "my-service"],
+        "env": { "SYSTEMD_COLORS": "1" },
+        "working_directory": "always_home"
+      }
+    ]
+  }
+}
+```
+
+`label` names the menu entry and the terminal tab. `env` is merged on top of the `terminal.env` variables, and `working_directory` accepts the same values as the [working directory](#working-directory) setting, defaulting to it when omitted.
+
+Profiles can also be opened from the command palette or bound to a key:
+
+```json [keymap]
+[
+  {
+    "bindings": {
+      "ctrl-alt-l": ["terminal::NewTerminalWithProfile", { "profile": "Login shell" }]
+    }
+  }
+]
+```
+
 ## Working Directory
 
 Control where new terminals start:

@@ -5,6 +5,7 @@ use crate::{
     persistence::{
         SerializedItems, SerializedTerminalPanel, deserialize_terminal_panel, serialize_pane_group,
     },
+    working_directory_for,
 };
 use breadcrumbs::Breadcrumbs;
 use collections::HashMap;
@@ -17,10 +18,15 @@ use gpui::{
 };
 use itertools::Itertools;
 use project::{Fs, Project};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 use settings::{Settings, TerminalDockPosition};
 use task::{RevealStrategy, RevealTarget, Shell, ShellBuilder, SpawnInTerminal, TaskId};
-use terminal::{Terminal, terminal_settings::TerminalSettings};
+use terminal::{
+    Terminal,
+    terminal_settings::{TerminalProfile, TerminalSettings},
+};
 use ui::{
     ButtonLike, Clickable, CommonAnimationExt, ContextMenu, FluentBuilder, PopoverMenu,
     SplitButton, Toggleable, Tooltip, prelude::*,
@@ -52,10 +58,20 @@ actions!(
     ]
 );
 
+/// Opens a new terminal running one of the profiles from the `terminal.profiles` setting.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Action)]
+#[action(namespace = terminal)]
+#[serde(deny_unknown_fields)]
+pub struct NewTerminalWithProfile {
+    /// The `label` of the profile to open, as configured in `terminal.profiles`.
+    pub profile: String,
+}
+
 pub fn init(cx: &mut App) {
     cx.observe_new(
         |workspace: &mut Workspace, _window, _: &mut Context<Workspace>| {
             workspace.register_action(TerminalPanel::new_terminal);
+            workspace.register_action(TerminalPanel::new_terminal_with_profile);
             workspace.register_action(TerminalPanel::open_terminal);
             workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
                 if is_enabled_in_workspace(workspace, cx) {
@@ -154,8 +170,14 @@ impl TerminalPanel {
                             .with_handle(pane.new_item_context_menu_handle.clone())
                             .menu(move |window, cx| {
                                 let focus_handle = focus_handle.clone();
-                                let menu = ContextMenu::build(window, cx, |menu, _, _| {
-                                    menu.context(focus_handle.clone())
+                                let profile_labels = TerminalSettings::get_global(cx)
+                                    .profiles
+                                    .iter()
+                                    .map(|profile| profile.label.clone())
+                                    .collect::<Vec<_>>();
+                                let menu = ContextMenu::build(window, cx, move |menu, _, _| {
+                                    let menu = menu
+                                        .context(focus_handle.clone())
                                         .action(
                                             "New Terminal",
                                             workspace::NewTerminal::default().boxed_clone(),
@@ -166,7 +188,19 @@ impl TerminalPanel {
                                         .action(
                                             "Spawn Task",
                                             zed_actions::Spawn::modal().boxed_clone(),
-                                        )
+                                        );
+                                    if profile_labels.is_empty() {
+                                        return menu;
+                                    }
+                                    profile_labels.into_iter().fold(
+                                        menu.separator(),
+                                        |menu, label| {
+                                            let action = NewTerminalWithProfile {
+                                                profile: label.clone(),
+                                            };
+                                            menu.action(label, action.boxed_clone())
+                                        },
+                                    )
                                 });
 
                                 Some(menu)
@@ -777,6 +811,66 @@ impl TerminalPanel {
             .detach_and_log_err(cx);
     }
 
+    /// Create a new Terminal running the program of one of the configured terminal profiles
+    fn new_terminal_with_profile(
+        workspace: &mut Workspace,
+        action: &NewTerminalWithProfile,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let profile = TerminalSettings::get_global(cx)
+            .profiles
+            .iter()
+            .find(|profile| profile.label == action.profile)
+            .cloned();
+        let Some(profile) = profile else {
+            workspace.show_error(
+                anyhow!(
+                    "No terminal profile named `{}` is configured",
+                    action.profile
+                ),
+                cx,
+            );
+            return;
+        };
+
+        let working_directory = match &profile.working_directory {
+            Some(working_directory) => working_directory_for(working_directory, workspace, cx),
+            None => default_working_directory(workspace, cx),
+        };
+
+        let center_pane = workspace.active_pane();
+        let center_pane_has_focus = center_pane.focus_handle(cx).contains_focused(window, cx);
+        let active_center_item_is_terminal = center_pane
+            .read(cx)
+            .active_item()
+            .is_some_and(|item| item.downcast::<TerminalView>().is_some());
+
+        if center_pane_has_focus && active_center_item_is_terminal {
+            Self::add_center_terminal(workspace, window, cx, move |project, cx| {
+                project.create_terminal_profile(working_directory, profile, cx)
+            })
+            .detach_and_log_err(cx);
+            return;
+        }
+
+        let Some(terminal_panel) = workspace.panel::<Self>(cx) else {
+            return;
+        };
+
+        terminal_panel
+            .update(cx, |this, cx| {
+                this.add_terminal_profile(
+                    working_directory,
+                    profile,
+                    RevealStrategy::Always,
+                    window,
+                    cx,
+                )
+            })
+            .detach_and_log_err(cx);
+    }
+
     fn terminals_for_task(
         &self,
         label: &str,
@@ -937,6 +1031,29 @@ impl TerminalPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<WeakEntity<Terminal>>> {
+        self.add_terminal_shell_internal(force_local, cwd, None, reveal_strategy, window, cx)
+    }
+
+    fn add_terminal_profile(
+        &mut self,
+        cwd: Option<PathBuf>,
+        profile: TerminalProfile,
+        reveal_strategy: RevealStrategy,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<WeakEntity<Terminal>>> {
+        self.add_terminal_shell_internal(false, cwd, Some(profile), reveal_strategy, window, cx)
+    }
+
+    fn add_terminal_shell_internal(
+        &mut self,
+        force_local: bool,
+        cwd: Option<PathBuf>,
+        profile: Option<TerminalProfile>,
+        reveal_strategy: RevealStrategy,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<WeakEntity<Terminal>>> {
         let workspace = self.workspace.clone();
         self.spawn_pending_terminal(window, cx, async move |terminal_panel, cx| {
             if workspace.update(cx, |workspace, cx| !is_enabled_in_workspace(workspace, cx))? {
@@ -946,6 +1063,12 @@ impl TerminalPanel {
             let terminal = if force_local {
                 project
                     .update(cx, |project, cx| project.create_local_terminal(cx))
+                    .await
+            } else if let Some(profile) = profile {
+                project
+                    .update(cx, |project, cx| {
+                        project.create_terminal_profile(cwd, profile, cx)
+                    })
                     .await
             } else {
                 project
@@ -2997,6 +3120,84 @@ mod tests {
         assert_eq!(
             center_items_after, center_items_before,
             "Center pane should not gain a new terminal"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_new_terminal_with_profile(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.terminal.get_or_insert_default().project.profiles =
+                        Some(vec![settings::TerminalProfileContent {
+                            label: "Profile shell".to_owned(),
+                            program: util::get_system_shell(),
+                            args: Vec::new(),
+                            env: HashMap::default(),
+                            working_directory: None,
+                        }]);
+                });
+            });
+        });
+
+        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
+
+        window_handle
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    TerminalPanel::new_terminal_with_profile(
+                        workspace,
+                        &NewTerminalWithProfile {
+                            profile: "Profile shell".to_owned(),
+                        },
+                        window,
+                        cx,
+                    );
+                })
+            })
+            .expect("Failed to open a terminal for the profile");
+        cx.run_until_parked();
+
+        let profile_terminal_title = terminal_panel.read_with(cx, |panel, cx| {
+            let active_item = panel
+                .active_pane
+                .read(cx)
+                .active_item()
+                .expect("Profile terminal should be the active panel item");
+            let terminal_view = active_item
+                .downcast::<TerminalView>()
+                .expect("Profile terminal should be a TerminalView");
+            terminal_view.read(cx).terminal().read(cx).title(false)
+        });
+        assert_eq!(
+            profile_terminal_title, "Profile shell",
+            "Profile terminals should be titled after their profile label"
+        );
+
+        let panel_items =
+            terminal_panel.read_with(cx, |panel, cx| panel.active_pane.read(cx).items_len());
+        window_handle
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    TerminalPanel::new_terminal_with_profile(
+                        workspace,
+                        &NewTerminalWithProfile {
+                            profile: "Missing".to_owned(),
+                        },
+                        window,
+                        cx,
+                    );
+                })
+            })
+            .expect("Failed to handle an unknown profile");
+        cx.run_until_parked();
+
+        assert_eq!(
+            terminal_panel.read_with(cx, |panel, cx| panel.active_pane.read(cx).items_len()),
+            panel_items,
+            "Unknown profiles should not open a terminal"
         );
     }
 

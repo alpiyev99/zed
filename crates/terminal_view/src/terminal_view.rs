@@ -2128,8 +2128,20 @@ impl SearchableItem for TerminalView {
 /// local `is_dir` checks) is skipped -- returning `None` lets the remote shell
 /// open in the remote user's home directory by default.
 pub fn default_working_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
+    working_directory_for(
+        &TerminalSettings::get_global(cx).working_directory,
+        workspace,
+        cx,
+    )
+}
+
+pub fn working_directory_for(
+    working_directory: &WorkingDirectory,
+    workspace: &Workspace,
+    cx: &App,
+) -> Option<PathBuf> {
     let is_remote = workspace.project().read(cx).is_remote();
-    let directory = match &TerminalSettings::get_global(cx).working_directory {
+    let directory = match working_directory {
         WorkingDirectory::CurrentFileDirectory => workspace
             .project()
             .read(cx)

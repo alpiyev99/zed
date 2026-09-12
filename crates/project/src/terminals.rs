@@ -16,7 +16,7 @@ use std::{
 use task::{Shell, ShellBuilder, ShellKind, SpawnInTerminal};
 use terminal::{
     Terminal, TerminalBuilder, TerminalMode, insert_zed_terminal_env,
-    terminal_settings::TerminalSettings,
+    terminal_settings::{TerminalProfile, TerminalSettings},
 };
 use util::{
     command::new_std_command, get_default_system_shell, get_system_shell, maybe, rel_path::RelPath,
@@ -286,7 +286,18 @@ impl Project {
         cwd: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<Terminal>>> {
-        self.create_terminal_shell_internal(cwd, false, cx)
+        self.create_terminal_shell_internal(cwd, false, None, cx)
+    }
+
+    /// Creates a terminal running the program of a configured terminal profile,
+    /// instead of the shell from the `terminal.shell` setting.
+    pub fn create_terminal_profile(
+        &mut self,
+        cwd: Option<PathBuf>,
+        profile: TerminalProfile,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<Terminal>>> {
+        self.create_terminal_shell_internal(cwd, false, Some(profile), cx)
     }
 
     /// Creates a local terminal even if the project is remote.
@@ -303,7 +314,7 @@ impl Project {
             // Local project: use project directory like normal terminals
             self.active_project_directory(cx).map(|p| p.to_path_buf())
         };
-        self.create_terminal_shell_internal(working_directory, true, cx)
+        self.create_terminal_shell_internal(working_directory, true, None, cx)
     }
 
     /// Internal method for creating terminal shells.
@@ -313,6 +324,7 @@ impl Project {
         &mut self,
         cwd: Option<PathBuf>,
         force_local: bool,
+        profile: Option<TerminalProfile>,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<Terminal>>> {
         let path = cwd.map(|p| Arc::from(&*p));
@@ -327,7 +339,11 @@ impl Project {
                 path: RelPath::empty(),
             });
         }
-        let settings = TerminalSettings::get(settings_location, cx).clone();
+        let mut settings = TerminalSettings::get(settings_location, cx).clone();
+        if let Some(profile) = &profile {
+            settings.shell = profile.shell.clone();
+            settings.env.extend(profile.env.clone());
+        }
         let detect_venv = settings.detect_venv.as_option().is_some();
         let local_path = if is_via_remote { None } else { path.clone() };
 
@@ -401,7 +417,13 @@ impl Project {
                     let (shell, env) = {
                         match remote_client {
                             Some(remote_client) => {
-                                create_remote_shell(None, env, path, remote_client, cx)?
+                                let spawn_command = match (&profile, &settings.shell) {
+                                    (Some(_), Shell::WithArguments { program, args, .. }) => {
+                                        Some((program, args))
+                                    }
+                                    _ => None,
+                                };
+                                create_remote_shell(spawn_command, env, path, remote_client, cx)?
                             }
                             None => (settings.shell, env),
                         }
