@@ -1,4 +1,4 @@
-use std::{cmp, path::PathBuf, process::ExitStatus, sync::Arc, time::Duration};
+use std::{cmp, path::PathBuf, process::ExitStatus, rc::Rc, sync::Arc, time::Duration};
 
 use crate::{
     TerminalView, default_working_directory,
@@ -67,7 +67,26 @@ pub struct NewTerminalWithProfile {
     pub profile: String,
 }
 
+fn terminal_profile_menu_entries(cx: &App) -> Vec<(SharedString, Box<dyn Action>)> {
+    TerminalSettings::get_global(cx)
+        .profiles
+        .iter()
+        .map(|profile| {
+            let action = NewTerminalWithProfile {
+                profile: profile.label.clone(),
+            };
+            (
+                SharedString::from(profile.label.clone()),
+                action.boxed_clone(),
+            )
+        })
+        .collect()
+}
+
 pub fn init(cx: &mut App) {
+    cx.set_global(workspace::TerminalMenuEntries(Rc::new(
+        terminal_profile_menu_entries,
+    )));
     cx.observe_new(
         |workspace: &mut Workspace, _window, _: &mut Context<Workspace>| {
             workspace.register_action(TerminalPanel::new_terminal);
@@ -170,11 +189,7 @@ impl TerminalPanel {
                             .with_handle(pane.new_item_context_menu_handle.clone())
                             .menu(move |window, cx| {
                                 let focus_handle = focus_handle.clone();
-                                let profile_labels = TerminalSettings::get_global(cx)
-                                    .profiles
-                                    .iter()
-                                    .map(|profile| profile.label.clone())
-                                    .collect::<Vec<_>>();
+                                let profile_entries = terminal_profile_menu_entries(cx);
                                 let menu = ContextMenu::build(window, cx, move |menu, _, _| {
                                     let menu = menu
                                         .context(focus_handle.clone())
@@ -189,18 +204,14 @@ impl TerminalPanel {
                                             "Spawn Task",
                                             zed_actions::Spawn::modal().boxed_clone(),
                                         );
-                                    if profile_labels.is_empty() {
+                                    if profile_entries.is_empty() {
                                         return menu;
                                     }
-                                    profile_labels.into_iter().fold(
-                                        menu.separator(),
-                                        |menu, label| {
-                                            let action = NewTerminalWithProfile {
-                                                profile: label.clone(),
-                                            };
-                                            menu.action(label, action.boxed_clone())
-                                        },
-                                    )
+                                    profile_entries
+                                        .into_iter()
+                                        .fold(menu.separator(), |menu, (label, action)| {
+                                            menu.action(label, action)
+                                        })
                                 });
 
                                 Some(menu)
@@ -3120,6 +3131,42 @@ mod tests {
         assert_eq!(
             center_items_after, center_items_before,
             "Center pane should not gain a new terminal"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_terminal_profiles_in_center_pane_menu(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.terminal.get_or_insert_default().project.profiles =
+                        Some(vec![settings::TerminalProfileContent {
+                            label: "Profile shell".to_owned(),
+                            program: util::get_system_shell(),
+                            args: Vec::new(),
+                            env: HashMap::default(),
+                            working_directory: None,
+                        }]);
+                });
+            });
+        });
+
+        let entries = cx.update(|cx| {
+            let entries = cx.global::<workspace::TerminalMenuEntries>();
+            (entries.0)(cx)
+        });
+        let entries = entries
+            .iter()
+            .map(|(label, action)| (label.to_string(), action.name()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries,
+            vec![(
+                "Profile shell".to_owned(),
+                NewTerminalWithProfile::name_for_type()
+            )],
+            "The center pane's new item menu should list the configured terminal profiles"
         );
     }
 

@@ -21,9 +21,9 @@ use git::{CopyFilePermalink, OpenFilePermalink};
 use gpui::{
     Action, Anchor, AnyElement, App, AsyncWindowContext, ClickEvent, ClipboardItem, Context, Div,
     DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, FocusOutEvent,
-    Focusable, KeyContext, MouseButton, NavigationDirection, Pixels, Point, PromptLevel, Render,
-    ScrollHandle, Subscription, Task, TaskExt, WeakEntity, WeakFocusHandle, Window, actions,
-    anchored, deferred, prelude::*,
+    Focusable, Global, KeyContext, MouseButton, NavigationDirection, Pixels, Point, PromptLevel,
+    Render, ScrollHandle, Subscription, Task, TaskExt, WeakEntity, WeakFocusHandle, Window,
+    actions, anchored, deferred, prelude::*,
 };
 use itertools::Itertools;
 use language::{Capability, DiagnosticSeverity};
@@ -4308,6 +4308,15 @@ impl Pane {
     }
 }
 
+/// Entries added under "New Center Terminal" in the pane's new item menu.
+///
+/// Terminal profiles live in the terminal crates, which the workspace doesn't depend on,
+/// so they register a provider here instead of the menu reading their settings.
+#[derive(Clone)]
+pub struct TerminalMenuEntries(pub Rc<dyn Fn(&App) -> Vec<(SharedString, Box<dyn Action>)>>);
+
+impl Global for TerminalMenuEntries {}
+
 fn default_render_tab_bar_buttons(
     pane: &mut Pane,
     window: &mut Window,
@@ -4335,8 +4344,13 @@ fn default_render_tab_bar_buttons(
                 .anchor(Anchor::TopRight)
                 .with_handle(pane.new_item_context_menu_handle.clone())
                 .menu(move |window, cx| {
-                    Some(ContextMenu::build(window, cx, |menu, _, _| {
-                        menu.action("New File", NewFile.boxed_clone())
+                    let terminal_entries = cx
+                        .try_global::<TerminalMenuEntries>()
+                        .map(|entries| (entries.0)(cx))
+                        .unwrap_or_default();
+                    Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                        let menu = menu
+                            .action("New File", NewFile.boxed_clone())
                             .action("Open File", ToggleFileFinder::default().boxed_clone())
                             .separator()
                             .action("Search Project", DeploySearch::default().boxed_clone())
@@ -4346,7 +4360,15 @@ fn default_render_tab_bar_buttons(
                             .action(
                                 "New Center Terminal",
                                 NewCenterTerminal::default().boxed_clone(),
-                            )
+                            );
+                        if terminal_entries.is_empty() {
+                            return menu;
+                        }
+                        terminal_entries
+                            .into_iter()
+                            .fold(menu.separator(), |menu, (label, action)| {
+                                menu.action(label, action)
+                            })
                     }))
                 }),
         )

@@ -61,7 +61,7 @@ To pass arguments to your shell:
 
 ## Terminal Profiles
 
-Profiles add entries to the `+` menu of the terminal panel, each one opening a terminal that runs the program you configure instead of your shell:
+Profiles add entries to the `+` menu of both the terminal panel and the editor panes, each one opening a terminal that runs the program you configure instead of your shell:
 
 ```json [settings]
 {
